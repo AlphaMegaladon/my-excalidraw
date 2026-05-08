@@ -66,6 +66,14 @@ function buildAuthHeaders(secret: string) {
   };
 }
 
+function isVercelBlobUrl(value: string) {
+  try {
+    return new URL(value).hostname.endsWith(".blob.vercel-storage.com");
+  } catch {
+    return false;
+  }
+}
+
 export default function BoardClient() {
   const [secret, setSecret] = useState("");
   const [passwordInput, setPasswordInput] = useState("");
@@ -76,6 +84,7 @@ export default function BoardClient() {
   const [saveError, setSaveError] = useState("");
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const latestSceneRef = useRef<SceneSnapshot | null>(null);
+  const uploadedFileUrlsRef = useRef<Record<string, string>>({});
   const hasLoadedSecretRef = useRef(false);
 
   const isLoggedIn = secret.length > 0;
@@ -86,6 +95,39 @@ export default function BoardClient() {
     setPasswordInput("");
     setInitialData(null);
     latestSceneRef.current = null;
+    uploadedFileUrlsRef.current = {};
+  }, []);
+
+  const rememberUploadedFileUrls = useCallback((payload: BoardPayload) => {
+    const urls = { ...uploadedFileUrlsRef.current };
+
+    for (const [fileId, file] of Object.entries(payload.files)) {
+      if (typeof file.dataURL === "string" && isVercelBlobUrl(file.dataURL)) {
+        urls[fileId] = file.dataURL;
+      }
+    }
+
+    uploadedFileUrlsRef.current = urls;
+  }, []);
+
+  const replaceKnownFileDataUrls = useCallback((payload: BoardPayload): BoardPayload => {
+    const files = { ...payload.files };
+
+    for (const [fileId, blobUrl] of Object.entries(uploadedFileUrlsRef.current)) {
+      const file = files[fileId];
+
+      if (file && typeof file.dataURL === "string" && file.dataURL.startsWith("data:")) {
+        files[fileId] = {
+          ...file,
+          dataURL: blobUrl as typeof file.dataURL,
+        };
+      }
+    }
+
+    return {
+      ...payload,
+      files,
+    };
   }, []);
 
   const loadBoard = useCallback(
@@ -118,6 +160,7 @@ export default function BoardClient() {
         }
 
         setInitialData(payload);
+        rememberUploadedFileUrls(payload);
         setSaveStatus("saved");
       } catch {
         setLoginError("Das Board konnte nicht geladen werden.");
@@ -125,7 +168,7 @@ export default function BoardClient() {
         setIsLoading(false);
       }
     },
-    [clearSavedSecret],
+    [clearSavedSecret, rememberUploadedFileUrls],
   );
 
   useEffect(() => {
@@ -164,13 +207,14 @@ export default function BoardClient() {
       setSaveError("");
 
       try {
+        const payloadWithBlobUrls = replaceKnownFileDataUrls(payload);
         const response = await fetch("/api/board", {
           method: "POST",
           headers: {
             ...buildAuthHeaders(secret),
             "Content-Type": "application/json",
           },
-          body: JSON.stringify(payload),
+          body: JSON.stringify(payloadWithBlobUrls),
         });
 
         if (response.status === 401) {
@@ -184,13 +228,23 @@ export default function BoardClient() {
           throw new Error("Save failed");
         }
 
+        const responseBody: unknown = await response.json();
+
+        if (isJsonObject(responseBody)) {
+          const savedBoard = normalizeBoardPayload(responseBody.board);
+
+          if (savedBoard) {
+            rememberUploadedFileUrls(savedBoard);
+          }
+        }
+
         setSaveStatus("saved");
       } catch {
         setSaveStatus("error");
         setSaveError("Änderungen konnten nicht gespeichert werden.");
       }
     },
-    [clearSavedSecret, secret],
+    [clearSavedSecret, rememberUploadedFileUrls, replaceKnownFileDataUrls, secret],
   );
 
   const buildPayloadFromScene = useCallback(async (scene: SceneSnapshot) => {
