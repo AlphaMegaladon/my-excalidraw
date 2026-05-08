@@ -199,15 +199,7 @@ export async function GET(request: Request) {
       return fallbackBoard();
     }
 
-    // Proxy-Stream: Umgeht das CORS/Redirect-Problem
-    const blobResponse = await fetch(blobs[0].url);
-    return new Response(blobResponse.body, {
-      status: 200,
-      headers: {
-        "Content-Type": "application/json",
-        "Cache-Control": "no-store",
-      },
-    });
+    return json({ boardUrl: blobs[0].url });
   } catch (error) {
     console.warn(
       `Falling back to an empty board because ${process.env.BLOB_FILENAME} could not be loaded.`,

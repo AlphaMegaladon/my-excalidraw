@@ -31,6 +31,10 @@ type BoardPayload = {
   files: NonNullable<ExcalidrawInitialDataState["files"]>;
 };
 
+type BoardUrlPayload = {
+  boardUrl: string;
+};
+
 type OnChange = NonNullable<ExcalidrawProps["onChange"]>;
 type SceneSnapshot = {
   elements: Parameters<OnChange>[0];
@@ -58,6 +62,10 @@ function normalizeBoardPayload(value: unknown): BoardPayload | null {
     appState: value.appState as BoardPayload["appState"],
     files: isJsonObject(value.files) ? (value.files as BoardPayload["files"]) : {},
   };
+}
+
+function isBoardUrlPayload(value: unknown): value is BoardUrlPayload {
+  return isJsonObject(value) && typeof value.boardUrl === "string";
 }
 
 function buildAuthHeaders(secret: string) {
@@ -152,7 +160,21 @@ export default function BoardClient() {
           return;
         }
 
-        const payload = normalizeBoardPayload(await response.json());
+        const apiPayload: unknown = await response.json();
+        let payload = normalizeBoardPayload(apiPayload);
+
+        if (!payload && isBoardUrlPayload(apiPayload)) {
+          const boardResponse = await fetch(apiPayload.boardUrl, {
+            cache: "no-store",
+          });
+
+          if (!boardResponse.ok) {
+            setLoginError("Das Board konnte nicht geladen werden.");
+            return;
+          }
+
+          payload = normalizeBoardPayload(await boardResponse.json());
+        }
 
         if (!payload) {
           setLoginError("Die gespeicherten Board-Daten haben ein unerwartetes Format.");
