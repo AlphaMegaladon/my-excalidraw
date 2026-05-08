@@ -2,7 +2,7 @@ import { get, put } from "@vercel/blob";
 
 export const runtime = "nodejs";
 
-const BOARD_PATH = "board.json";
+const BOARD_PATH = "board-8f3a9c2b.json";
 const IMAGE_PREFIX = "files";
 
 type BoardPayload = {
@@ -83,15 +83,8 @@ function normalizeBoardPayload(value: unknown): BoardPayload | null {
   };
 }
 
-function emptyBoard(): BoardPayload {
-  return {
-    type: "excalidraw",
-    version: 2,
-    source: "https://excalidraw.com",
-    elements: [],
-    appState: {},
-    files: {},
-  };
+function fallbackBoard() {
+  return json({ elements: [] });
 }
 
 async function readStreamAsText(stream: ReadableStream<Uint8Array>) {
@@ -201,24 +194,24 @@ export async function GET(request: Request) {
 
   try {
     const blob = await get(BOARD_PATH, {
-      access: "private",
+      access: "public",
       useCache: false,
     });
 
     if (!blob || blob.statusCode === 304) {
-      return json(emptyBoard());
+      return fallbackBoard();
     }
 
     const payload = normalizeBoardPayload(JSON.parse(await readStreamAsText(blob.stream)));
 
     if (!payload) {
-      return json({ error: "Stored board.json has an invalid format." }, { status: 500 });
+      return fallbackBoard();
     }
 
     return json(payload);
   } catch (error) {
-    console.error("Failed to load board.json from Vercel Blob.", error);
-    return json({ error: "Failed to load board." }, { status: 500 });
+    console.warn(`Falling back to an empty board because ${BOARD_PATH} could not be loaded.`, error);
+    return fallbackBoard();
   }
 }
 
@@ -246,7 +239,7 @@ export async function POST(request: Request) {
     const boardWithBlobUrls = await uploadFilesAndReplaceDataUrls(board);
 
     await put(BOARD_PATH, JSON.stringify(boardWithBlobUrls, null, 2), {
-      access: "private",
+      access: "public",
       addRandomSuffix: false,
       allowOverwrite: true,
       contentType: "application/json",
@@ -255,7 +248,7 @@ export async function POST(request: Request) {
 
     return json({ ok: true, board: boardWithBlobUrls });
   } catch (error) {
-    console.error("Failed to save board.json to Vercel Blob.", error);
+    console.error(`Failed to save ${BOARD_PATH} to Vercel Blob.`, error);
     return json({ error: "Failed to save board." }, { status: 500 });
   }
 }
