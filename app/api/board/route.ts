@@ -1,8 +1,7 @@
-import { get, put } from "@vercel/blob";
+import { list, put } from "@vercel/blob";
 
 export const runtime = "nodejs";
 
-const BOARD_PATH = "board-8f3a9c2b.json";
 const IMAGE_PREFIX = "files";
 
 type BoardPayload = {
@@ -49,6 +48,10 @@ function authError(request: Request) {
     return json({ error: "BLOB_READ_WRITE_TOKEN is not configured." }, { status: 500 });
   }
 
+  if (!process.env.BLOB_FILENAME) {
+    return json({ error: "BLOB_FILENAME is not configured." }, { status: 500 });
+  }
+
   return null;
 }
 
@@ -84,11 +87,7 @@ function normalizeBoardPayload(value: unknown): BoardPayload | null {
 }
 
 function fallbackBoard() {
-  return json({ elements: [] });
-}
-
-async function readStreamAsText(stream: ReadableStream<Uint8Array>) {
-  return new Response(stream).text();
+  return json({ elements: [], appState: {}, files: {} });
 }
 
 function parseDataUrl(dataUrl: string, fallbackMimeType: string) {
@@ -193,16 +192,20 @@ export async function GET(request: Request) {
   }
 
   try {
-    const blob = await get(BOARD_PATH, {
-      access: "public",
-      useCache: false,
-    });
+    const boardPath = process.env.BLOB_FILENAME as string;
+    const { blobs } = await list({ prefix: boardPath, limit: 1 });
 
-    if (!blob || blob.statusCode === 304) {
+    if (blobs.length === 0) {
       return fallbackBoard();
     }
 
-    const payload = normalizeBoardPayload(JSON.parse(await readStreamAsText(blob.stream)));
+    const response = await fetch(blobs[0].url, { cache: "no-store" });
+
+    if (!response.ok) {
+      return fallbackBoard();
+    }
+
+    const payload = normalizeBoardPayload(await response.json());
 
     if (!payload) {
       return fallbackBoard();
@@ -210,7 +213,10 @@ export async function GET(request: Request) {
 
     return json(payload);
   } catch (error) {
-    console.warn(`Falling back to an empty board because ${BOARD_PATH} could not be loaded.`, error);
+    console.warn(
+      `Falling back to an empty board because ${process.env.BLOB_FILENAME} could not be loaded.`,
+      error,
+    );
     return fallbackBoard();
   }
 }
@@ -236,9 +242,10 @@ export async function POST(request: Request) {
   }
 
   try {
+    const boardPath = process.env.BLOB_FILENAME as string;
     const boardWithBlobUrls = await uploadFilesAndReplaceDataUrls(board);
 
-    await put(BOARD_PATH, JSON.stringify(boardWithBlobUrls, null, 2), {
+    await put(boardPath, JSON.stringify(boardWithBlobUrls, null, 2), {
       access: "public",
       addRandomSuffix: false,
       allowOverwrite: true,
@@ -248,7 +255,7 @@ export async function POST(request: Request) {
 
     return json({ ok: true, board: boardWithBlobUrls });
   } catch (error) {
-    console.error(`Failed to save ${BOARD_PATH} to Vercel Blob.`, error);
+    console.error(`Failed to save ${process.env.BLOB_FILENAME} to Vercel Blob.`, error);
     return json({ error: "Failed to save board." }, { status: 500 });
   }
 }
