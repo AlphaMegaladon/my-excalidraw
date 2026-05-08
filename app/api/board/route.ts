@@ -199,19 +199,7 @@ export async function GET(request: Request) {
       return fallbackBoard();
     }
 
-    const response = await fetch(blobs[0].url, { cache: "no-store" });
-
-    if (!response.ok) {
-      return fallbackBoard();
-    }
-
-    const payload = normalizeBoardPayload(await response.json());
-
-    if (!payload) {
-      return fallbackBoard();
-    }
-
-    return json(payload);
+    return Response.redirect(blobs[0].url, 307);
   } catch (error) {
     console.warn(
       `Falling back to an empty board because ${process.env.BLOB_FILENAME} could not be loaded.`,
