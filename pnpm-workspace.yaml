@@ -1,0 +1,4 @@
+allowBuilds:
+  bufferutil: false
+  sharp: false
+  unrs-resolver: false

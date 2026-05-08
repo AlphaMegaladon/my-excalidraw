@@ -1,5 +1,5 @@
-import Image from "next/image";
+import BoardClient from "./board-client";
 
 export default function Home() {
-  return <p> Just say hello</p>
+  return <BoardClient />;
 }
