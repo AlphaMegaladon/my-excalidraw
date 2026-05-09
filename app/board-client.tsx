@@ -1,6 +1,7 @@
 "use client";
 
 import dynamic from "next/dynamic";
+import { upload } from "@vercel/blob/client";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import "@excalidraw/excalidraw/index.css";
 
@@ -12,6 +13,8 @@ import type {
 
 const STORAGE_KEY = "my-excalidraw-app-secret";
 const SAVE_DELAY_MS = 2_000;
+const UPLOAD_ROUTE = "/api/blob/upload";
+const MULTIPART_UPLOAD_THRESHOLD_BYTES = 4 * 1024 * 1024;
 
 const Excalidraw = dynamic<ExcalidrawProps>(
   async () => (await import("@excalidraw/excalidraw")).Excalidraw,
@@ -31,8 +34,11 @@ type BoardPayload = {
   files: NonNullable<ExcalidrawInitialDataState["files"]>;
 };
 
-type BoardUrlPayload = {
-  boardUrl: string;
+type BoardFile = BoardPayload["files"][string];
+
+type BoardMetadataPayload = {
+  boardPath: string;
+  boardUrl?: string;
 };
 
 type OnChange = NonNullable<ExcalidrawProps["onChange"]>;
@@ -64,8 +70,12 @@ function normalizeBoardPayload(value: unknown): BoardPayload | null {
   };
 }
 
-function isBoardUrlPayload(value: unknown): value is BoardUrlPayload {
-  return isJsonObject(value) && typeof value.boardUrl === "string";
+function isBoardMetadataPayload(value: unknown): value is BoardMetadataPayload {
+  return (
+    isJsonObject(value) &&
+    typeof value.boardPath === "string" &&
+    (value.boardUrl === undefined || typeof value.boardUrl === "string")
+  );
 }
 
 function buildAuthHeaders(secret: string) {
@@ -82,10 +92,91 @@ function isVercelBlobUrl(value: string) {
   }
 }
 
+function withCacheBust(url: string) {
+  const nextUrl = new URL(url);
+  nextUrl.searchParams.set("t", Date.now().toString());
+  return nextUrl.toString();
+}
+
+function hashString(value: string) {
+  let hash = 0;
+
+  for (let index = 0; index < value.length; index += 1) {
+    hash = (hash * 31 + value.charCodeAt(index)) >>> 0;
+  }
+
+  return hash.toString(36);
+}
+
+function buildBlobFileId(fileId: string) {
+  const readablePart = fileId.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 120) || "file";
+  return `${readablePart}-${hashString(fileId)}`.slice(0, 160);
+}
+
+function extensionForContentType(contentType: string) {
+  switch (contentType.toLowerCase()) {
+    case "image/jpeg":
+      return "jpg";
+    case "image/png":
+      return "png";
+    case "image/webp":
+      return "webp";
+    case "image/gif":
+      return "gif";
+    case "image/svg+xml":
+      return "svg";
+    default:
+      return "png";
+  }
+}
+
+function parseDataUrl(dataUrl: string, fallbackContentType = "image/png") {
+  const match = dataUrl.match(/^data:([^,]*),([\s\S]*)$/);
+
+  if (!match) {
+    throw new Error("Invalid data URL");
+  }
+
+  const [, metadata, rawData] = match;
+  const metadataParts = metadata.split(";").filter(Boolean);
+  const contentType = (metadataParts.find((part) => part.includes("/")) || fallbackContentType)
+    .toLowerCase();
+  const isBase64 = metadataParts.includes("base64");
+
+  if (isBase64) {
+    const binary = atob(rawData);
+    const bytes = new Uint8Array(binary.length);
+
+    for (let index = 0; index < binary.length; index += 1) {
+      bytes[index] = binary.charCodeAt(index);
+    }
+
+    return {
+      blob: new Blob([bytes], { type: contentType }),
+      contentType,
+    };
+  }
+
+  return {
+    blob: new Blob([decodeURIComponent(rawData)], { type: contentType }),
+    contentType,
+  };
+}
+
+function createBoardDocument(payload: BoardPayload) {
+  return {
+    type: "excalidraw",
+    version: 2,
+    source: "https://excalidraw.com",
+    ...payload,
+  };
+}
+
 export default function BoardClient() {
   const [secret, setSecret] = useState("");
   const [passwordInput, setPasswordInput] = useState("");
   const [initialData, setInitialData] = useState<BoardPayload | null>(null);
+  const [boardPath, setBoardPath] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [loginError, setLoginError] = useState("");
   const [saveStatus, setSaveStatus] = useState<SaveStatus>("idle");
@@ -102,6 +193,7 @@ export default function BoardClient() {
     setSecret("");
     setPasswordInput("");
     setInitialData(null);
+    setBoardPath("");
     latestSceneRef.current = null;
     uploadedFileUrlsRef.current = {};
   }, []);
@@ -161,19 +253,29 @@ export default function BoardClient() {
         }
 
         const apiPayload: unknown = await response.json();
+        let nextBoardPath = "";
         let payload = normalizeBoardPayload(apiPayload);
 
-        if (!payload && isBoardUrlPayload(apiPayload)) {
-          const boardResponse = await fetch(apiPayload.boardUrl, {
-            cache: "no-store",
-          });
+        if (isBoardMetadataPayload(apiPayload)) {
+          nextBoardPath = apiPayload.boardPath;
 
-          if (!boardResponse.ok) {
-            setLoginError("Das Board konnte nicht geladen werden.");
-            return;
+          if (apiPayload.boardUrl) {
+            const boardResponse = await fetch(withCacheBust(apiPayload.boardUrl), {
+              cache: "no-store",
+            });
+
+            if (!boardResponse.ok) {
+              setLoginError("Das Board konnte nicht geladen werden.");
+              return;
+            }
+
+            payload = normalizeBoardPayload(await boardResponse.json());
           }
+        }
 
-          payload = normalizeBoardPayload(await boardResponse.json());
+        if (!nextBoardPath) {
+          setLoginError("Der Board-Dateiname konnte nicht geladen werden.");
+          return;
         }
 
         if (!payload) {
@@ -181,6 +283,7 @@ export default function BoardClient() {
           return;
         }
 
+        setBoardPath(nextBoardPath);
         setInitialData(payload);
         rememberUploadedFileUrls(payload);
         setSaveStatus("saved");
@@ -219,9 +322,105 @@ export default function BoardClient() {
     };
   }, []);
 
+  const uploadBoardFile = useCallback(
+    async (fileId: string, file: BoardFile, nextSecret: string): Promise<BoardFile> => {
+      const dataUrl = file.dataURL;
+
+      if (typeof dataUrl !== "string") {
+        return file;
+      }
+
+      if (isVercelBlobUrl(dataUrl)) {
+        uploadedFileUrlsRef.current = {
+          ...uploadedFileUrlsRef.current,
+          [fileId]: dataUrl,
+        };
+        return file;
+      }
+
+      const knownBlobUrl = uploadedFileUrlsRef.current[fileId];
+
+      if (knownBlobUrl && dataUrl.startsWith("data:")) {
+        return {
+          ...file,
+          dataURL: knownBlobUrl as typeof file.dataURL,
+        };
+      }
+
+      if (!dataUrl.startsWith("data:")) {
+        return file;
+      }
+
+      const fallbackContentType =
+        typeof file.mimeType === "string" ? file.mimeType : "image/png";
+      const { blob, contentType } = parseDataUrl(dataUrl, fallbackContentType);
+      const blobFileId = buildBlobFileId(fileId);
+      const pathname = `files/${blobFileId}.${extensionForContentType(contentType)}`;
+      const uploadedBlob = await upload(pathname, blob, {
+        access: "public",
+        contentType,
+        handleUploadUrl: UPLOAD_ROUTE,
+        headers: buildAuthHeaders(nextSecret),
+        clientPayload: JSON.stringify({ kind: "file", fileId: blobFileId }),
+        multipart: blob.size >= MULTIPART_UPLOAD_THRESHOLD_BYTES,
+      });
+
+      uploadedFileUrlsRef.current = {
+        ...uploadedFileUrlsRef.current,
+        [fileId]: uploadedBlob.url,
+      };
+
+      return {
+        ...file,
+        dataURL: uploadedBlob.url as typeof file.dataURL,
+      };
+    },
+    [],
+  );
+
+  const uploadBoardFiles = useCallback(
+    async (payload: BoardPayload, nextSecret: string): Promise<BoardPayload> => {
+      const files = { ...payload.files };
+
+      for (const [fileId, file] of Object.entries(payload.files)) {
+        files[fileId] = await uploadBoardFile(fileId, file, nextSecret);
+      }
+
+      return {
+        ...payload,
+        files,
+      };
+    },
+    [uploadBoardFile],
+  );
+
+  const uploadBoardDocument = useCallback(
+    async (payload: BoardPayload, nextSecret: string, nextBoardPath: string) => {
+      const boardBlob = new Blob([JSON.stringify(createBoardDocument(payload))], {
+        type: "application/json",
+      });
+
+      await upload(nextBoardPath, boardBlob, {
+        access: "public",
+        contentType: "application/json",
+        handleUploadUrl: UPLOAD_ROUTE,
+        headers: buildAuthHeaders(nextSecret),
+        clientPayload: JSON.stringify({ kind: "board" }),
+        multipart: boardBlob.size >= MULTIPART_UPLOAD_THRESHOLD_BYTES,
+      });
+    },
+    [],
+  );
+
   const saveBoard = useCallback(
     async (payload: BoardPayload) => {
       if (!secret) {
+        return;
+      }
+
+      if (!boardPath) {
+        setSaveStatus("error");
+        setSaveError("Der Board-Dateiname konnte nicht geladen werden.");
         return;
       }
 
@@ -229,36 +428,11 @@ export default function BoardClient() {
       setSaveError("");
 
       try {
-        const payloadWithBlobUrls = replaceKnownFileDataUrls(payload);
-        const response = await fetch("/api/board", {
-          method: "POST",
-          headers: {
-            ...buildAuthHeaders(secret),
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify(payloadWithBlobUrls),
-        });
+        const payloadWithKnownBlobUrls = replaceKnownFileDataUrls(payload);
+        const payloadWithUploadedFiles = await uploadBoardFiles(payloadWithKnownBlobUrls, secret);
 
-        if (response.status === 401) {
-          clearSavedSecret();
-          setLoginError("Deine Sitzung ist abgelaufen. Bitte erneut anmelden.");
-          setSaveStatus("error");
-          return;
-        }
-
-        if (!response.ok) {
-          throw new Error("Save failed");
-        }
-
-        const responseBody: unknown = await response.json();
-
-        if (isJsonObject(responseBody)) {
-          const savedBoard = normalizeBoardPayload(responseBody.board);
-
-          if (savedBoard) {
-            rememberUploadedFileUrls(savedBoard);
-          }
-        }
+        await uploadBoardDocument(payloadWithUploadedFiles, secret, boardPath);
+        rememberUploadedFileUrls(payloadWithUploadedFiles);
 
         setSaveStatus("saved");
       } catch {
@@ -266,7 +440,14 @@ export default function BoardClient() {
         setSaveError("Änderungen konnten nicht gespeichert werden.");
       }
     },
-    [clearSavedSecret, rememberUploadedFileUrls, replaceKnownFileDataUrls, secret],
+    [
+      boardPath,
+      rememberUploadedFileUrls,
+      replaceKnownFileDataUrls,
+      secret,
+      uploadBoardDocument,
+      uploadBoardFiles,
+    ],
   );
 
   const buildPayloadFromScene = useCallback(async (scene: SceneSnapshot) => {

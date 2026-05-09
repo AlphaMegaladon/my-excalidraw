@@ -12,8 +12,8 @@ function json(data: unknown, init?: ResponseInit) {
   });
 }
 
-function fallbackBoard() {
-  return json({ elements: [], appState: {}, files: {} });
+function fallbackBoard(boardPath?: string) {
+  return json({ elements: [], appState: {}, files: {}, ...(boardPath ? { boardPath } : {}) });
 }
 
 function authError(request: Request) {
@@ -51,7 +51,7 @@ export async function GET(request: Request) {
     const boardBlob = blobs.find((blob) => blob.pathname === boardPath);
 
     if (!boardBlob) {
-      return fallbackBoard();
+      return fallbackBoard(boardPath);
     }
 
     return json({
@@ -60,7 +60,7 @@ export async function GET(request: Request) {
     });
   } catch (error) {
     console.warn(`Falling back to an empty board because ${boardPath} could not be listed.`, error);
-    return fallbackBoard();
+    return fallbackBoard(boardPath);
   }
 }
 
