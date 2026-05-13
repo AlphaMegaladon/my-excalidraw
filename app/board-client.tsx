@@ -49,6 +49,7 @@ type SceneSnapshot = {
 };
 
 type SaveStatus = "idle" | "saving" | "saved" | "error";
+type BoardTheme = "light" | "dark";
 
 function isJsonObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -76,6 +77,10 @@ function isBoardMetadataPayload(value: unknown): value is BoardMetadataPayload {
     typeof value.boardPath === "string" &&
     (value.boardUrl === undefined || typeof value.boardUrl === "string")
   );
+}
+
+function normalizeTheme(value: unknown): BoardTheme | null {
+  return value === "light" || value === "dark" ? value : null;
 }
 
 function buildAuthHeaders(secret: string) {
@@ -176,6 +181,7 @@ export default function BoardClient() {
   const [secret, setSecret] = useState("");
   const [passwordInput, setPasswordInput] = useState("");
   const [initialData, setInitialData] = useState<BoardPayload | null>(null);
+  const [theme, setTheme] = useState<BoardTheme>("dark");
   const [boardPath, setBoardPath] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [loginError, setLoginError] = useState("");
@@ -193,6 +199,7 @@ export default function BoardClient() {
     setSecret("");
     setPasswordInput("");
     setInitialData(null);
+    setTheme("dark");
     setBoardPath("");
     latestSceneRef.current = null;
     uploadedFileUrlsRef.current = {};
@@ -284,6 +291,7 @@ export default function BoardClient() {
         }
 
         setBoardPath(nextBoardPath);
+        setTheme(normalizeTheme(payload.appState.theme) ?? "dark");
         setInitialData(payload);
         rememberUploadedFileUrls(payload);
         setSaveStatus("saved");
@@ -488,6 +496,12 @@ export default function BoardClient() {
 
   const handleChange = useCallback<OnChange>(
     (elements, appState, files) => {
+      const nextTheme = normalizeTheme(appState.theme);
+
+      if (nextTheme) {
+        setTheme((currentTheme) => (currentTheme === nextTheme ? currentTheme : nextTheme));
+      }
+
       scheduleSave({ elements, appState, files });
     },
     [scheduleSave],
@@ -529,9 +543,10 @@ export default function BoardClient() {
       {initialData && (
         <div className="h-screen">
           <Excalidraw
+            theme={theme}
             initialData={{
               ...initialData,
-              scrollToContent: true,
+              scrollToContent: false,
             }}
             onChange={handleChange}
           />
