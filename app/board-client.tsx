@@ -83,6 +83,34 @@ function normalizeTheme(value: unknown): BoardTheme | null {
   return value === "light" || value === "dark" ? value : null;
 }
 
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function extractPersistentAppState(appState: SceneSnapshot["appState"]) {
+  const persistentAppState: Record<string, unknown> = {};
+
+  if (isFiniteNumber(appState.scrollX)) {
+    persistentAppState.scrollX = appState.scrollX;
+  }
+
+  if (isFiniteNumber(appState.scrollY)) {
+    persistentAppState.scrollY = appState.scrollY;
+  }
+
+  if (isFiniteNumber(appState.zoom?.value)) {
+    persistentAppState.zoom = { value: appState.zoom.value };
+  }
+
+  const nextTheme = normalizeTheme(appState.theme);
+
+  if (nextTheme) {
+    persistentAppState.theme = nextTheme;
+  }
+
+  return persistentAppState as Partial<BoardPayload["appState"]>;
+}
+
 function buildAuthHeaders(secret: string) {
   return {
     Authorization: `Bearer ${secret}`,
@@ -467,7 +495,13 @@ export default function BoardClient() {
       throw new Error("Unexpected serialized scene shape");
     }
 
-    return payload;
+    return {
+      ...payload,
+      appState: {
+        ...payload.appState,
+        ...extractPersistentAppState(scene.appState),
+      },
+    };
   }, []);
 
   const scheduleSave = useCallback(
