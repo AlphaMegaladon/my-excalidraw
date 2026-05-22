@@ -39,6 +39,7 @@ type BoardFile = BoardPayload["files"][string];
 type BoardMetadataPayload = {
   boardPath: string;
   boardUrl?: string;
+  boardEtag?: string | null;
 };
 
 type OnChange = NonNullable<ExcalidrawProps["onChange"]>;
@@ -50,6 +51,9 @@ type SceneSnapshot = {
 
 type SaveStatus = "idle" | "saving" | "saved" | "error";
 type BoardTheme = "light" | "dark";
+type BoardEtag = string | null;
+
+const BOARD_CONFLICT_MESSAGE = "Neuere Version verfügbar. Bitte neu laden.";
 
 function isJsonObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -75,8 +79,34 @@ function isBoardMetadataPayload(value: unknown): value is BoardMetadataPayload {
   return (
     isJsonObject(value) &&
     typeof value.boardPath === "string" &&
-    (value.boardUrl === undefined || typeof value.boardUrl === "string")
+    (value.boardUrl === undefined || typeof value.boardUrl === "string") &&
+    (value.boardEtag === undefined ||
+      value.boardEtag === null ||
+      typeof value.boardEtag === "string")
   );
+}
+
+function normalizeBoardEtag(value: unknown): BoardEtag {
+  return typeof value === "string" ? value : null;
+}
+
+class BoardConflictError extends Error {
+  constructor() {
+    super(BOARD_CONFLICT_MESSAGE);
+    this.name = "BoardConflictError";
+  }
+}
+
+function isBoardConflictError(error: unknown) {
+  if (error instanceof BoardConflictError) {
+    return true;
+  }
+
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  return error.name === "BlobPreconditionFailedError" || error.message.includes("ETag mismatch");
 }
 
 function normalizeTheme(value: unknown): BoardTheme | null {
@@ -218,6 +248,7 @@ export default function BoardClient() {
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const latestSceneRef = useRef<SceneSnapshot | null>(null);
   const uploadedFileUrlsRef = useRef<Record<string, string>>({});
+  const boardEtagRef = useRef<BoardEtag>(null);
   const hasLoadedSecretRef = useRef(false);
 
   const isLoggedIn = secret.length > 0;
@@ -231,6 +262,7 @@ export default function BoardClient() {
     setBoardPath("");
     latestSceneRef.current = null;
     uploadedFileUrlsRef.current = {};
+    boardEtagRef.current = null;
   }, []);
 
   const rememberUploadedFileUrls = useCallback((payload: BoardPayload) => {
@@ -293,6 +325,7 @@ export default function BoardClient() {
 
         if (isBoardMetadataPayload(apiPayload)) {
           nextBoardPath = apiPayload.boardPath;
+          boardEtagRef.current = normalizeBoardEtag(apiPayload.boardEtag);
 
           if (apiPayload.boardUrl) {
             const boardResponse = await fetch(withCacheBust(apiPayload.boardUrl), {
@@ -430,22 +463,53 @@ export default function BoardClient() {
     [uploadBoardFile],
   );
 
+  const assertCurrentBoardEtag = useCallback(
+    async (nextSecret: string, expectedBoardEtag: BoardEtag) => {
+      const metadataResponse = await fetch("/api/board", {
+        headers: buildAuthHeaders(nextSecret),
+        cache: "no-store",
+      });
+
+      if (!metadataResponse.ok) {
+        throw new Error("Could not check the current board version.");
+      }
+
+      const metadata: unknown = await metadataResponse.json();
+
+      if (!isBoardMetadataPayload(metadata)) {
+        throw new Error("Unexpected board metadata shape.");
+      }
+
+      if (normalizeBoardEtag(metadata.boardEtag) !== expectedBoardEtag) {
+        throw new BoardConflictError();
+      }
+    },
+    [],
+  );
+
   const uploadBoardDocument = useCallback(
-    async (payload: BoardPayload, nextSecret: string, nextBoardPath: string) => {
+    async (
+      payload: BoardPayload,
+      nextSecret: string,
+      nextBoardPath: string,
+      expectedBoardEtag: BoardEtag,
+    ) => {
       const boardBlob = new Blob([JSON.stringify(createBoardDocument(payload))], {
         type: "application/json",
       });
 
-      await upload(nextBoardPath, boardBlob, {
+      await assertCurrentBoardEtag(nextSecret, expectedBoardEtag);
+
+      return upload(nextBoardPath, boardBlob, {
         access: "public",
         contentType: "application/json",
         handleUploadUrl: UPLOAD_ROUTE,
         headers: buildAuthHeaders(nextSecret),
-        clientPayload: JSON.stringify({ kind: "board" }),
+        clientPayload: JSON.stringify({ kind: "board", expectedBoardEtag }),
         multipart: boardBlob.size >= MULTIPART_UPLOAD_THRESHOLD_BYTES,
       });
     },
-    [],
+    [assertCurrentBoardEtag],
   );
 
   const saveBoard = useCallback(
@@ -464,19 +528,33 @@ export default function BoardClient() {
       setSaveError("");
 
       try {
+        const expectedBoardEtag = boardEtagRef.current;
+        await assertCurrentBoardEtag(secret, expectedBoardEtag);
+
         const payloadWithKnownBlobUrls = replaceKnownFileDataUrls(payload);
         const payloadWithUploadedFiles = await uploadBoardFiles(payloadWithKnownBlobUrls, secret);
 
-        await uploadBoardDocument(payloadWithUploadedFiles, secret, boardPath);
+        const uploadedBoard = await uploadBoardDocument(
+          payloadWithUploadedFiles,
+          secret,
+          boardPath,
+          expectedBoardEtag,
+        );
         rememberUploadedFileUrls(payloadWithUploadedFiles);
+        boardEtagRef.current = normalizeBoardEtag(uploadedBoard.etag);
 
         setSaveStatus("saved");
-      } catch {
+      } catch (error) {
         setSaveStatus("error");
-        setSaveError("Änderungen konnten nicht gespeichert werden.");
+        setSaveError(
+          isBoardConflictError(error)
+            ? BOARD_CONFLICT_MESSAGE
+            : "Änderungen konnten nicht gespeichert werden.",
+        );
       }
     },
     [
+      assertCurrentBoardEtag,
       boardPath,
       rememberUploadedFileUrls,
       replaceKnownFileDataUrls,

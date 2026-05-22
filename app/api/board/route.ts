@@ -13,7 +13,13 @@ function json(data: unknown, init?: ResponseInit) {
 }
 
 function fallbackBoard(boardPath?: string) {
-  return json({ elements: [], appState: {}, files: {}, ...(boardPath ? { boardPath } : {}) });
+  return json({
+    elements: [],
+    appState: {},
+    files: {},
+    boardEtag: null,
+    ...(boardPath ? { boardPath } : {}),
+  });
 }
 
 function authError(request: Request) {
@@ -57,6 +63,7 @@ export async function GET(request: Request) {
     return json({
       boardPath,
       boardUrl: boardBlob.url,
+      boardEtag: boardBlob.etag,
     });
   } catch (error) {
     console.warn(`Falling back to an empty board because ${boardPath} could not be listed.`, error);

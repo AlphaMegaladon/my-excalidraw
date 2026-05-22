@@ -1,4 +1,5 @@
 import { handleUpload } from "@vercel/blob/client";
+import { BlobNotFoundError, head } from "@vercel/blob";
 
 import type { HandleUploadBody } from "@vercel/blob/client";
 
@@ -15,7 +16,15 @@ const IMAGE_CONTENT_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif
 type UploadClientPayload = {
   kind?: unknown;
   fileId?: unknown;
+  expectedBoardEtag?: unknown;
 };
+
+class BoardConflictError extends Error {
+  constructor() {
+    super("Board version conflict.");
+    this.name = "BoardConflictError";
+  }
+}
 
 function json(data: unknown, init?: ResponseInit) {
   return Response.json(data, {
@@ -71,7 +80,34 @@ function parseClientPayload(clientPayload: string | null): UploadClientPayload {
   return parsed;
 }
 
-function validateBoardUpload(pathname: string, payload: UploadClientPayload) {
+function parseExpectedBoardEtag(payload: UploadClientPayload) {
+  if (payload.expectedBoardEtag === null || typeof payload.expectedBoardEtag === "string") {
+    return payload.expectedBoardEtag;
+  }
+
+  throw new Error("Board uploads require clientPayload.expectedBoardEtag.");
+}
+
+function isBlobNotFoundError(error: unknown) {
+  return (
+    error instanceof BlobNotFoundError ||
+    (error instanceof Error && error.name === "BlobNotFoundError")
+  );
+}
+
+async function readBoardEtag(boardPath: string) {
+  try {
+    return (await head(boardPath)).etag;
+  } catch (error) {
+    if (isBlobNotFoundError(error)) {
+      return null;
+    }
+
+    throw error;
+  }
+}
+
+async function validateBoardUpload(pathname: string, payload: UploadClientPayload) {
   const boardPath = process.env.BLOB_FILENAME as string;
 
   if (payload.kind !== "board") {
@@ -82,13 +118,21 @@ function validateBoardUpload(pathname: string, payload: UploadClientPayload) {
     throw new Error("Board uploads may only target BLOB_FILENAME.");
   }
 
+  const expectedBoardEtag = parseExpectedBoardEtag(payload);
+  const currentBoardEtag = await readBoardEtag(boardPath);
+
+  if (currentBoardEtag !== expectedBoardEtag) {
+    throw new BoardConflictError();
+  }
+
   return {
     addRandomSuffix: false,
-    allowOverwrite: true,
+    allowOverwrite: currentBoardEtag !== null,
     allowedContentTypes: BOARD_CONTENT_TYPES,
     cacheControlMaxAge: 60,
+    ...(currentBoardEtag !== null ? { ifMatch: currentBoardEtag } : {}),
     maximumSizeInBytes: BOARD_MAX_BYTES,
-    tokenPayload: JSON.stringify({ kind: "board", pathname }),
+    tokenPayload: JSON.stringify({ kind: "board", pathname, expectedBoardEtag }),
     validUntil: Date.now() + TOKEN_TTL_MS,
   };
 }
@@ -125,7 +169,7 @@ function validateImageUpload(pathname: string, payload: UploadClientPayload) {
   };
 }
 
-function validateUpload(pathname: string, clientPayload: string | null) {
+async function validateUpload(pathname: string, clientPayload: string | null) {
   const payload = parseClientPayload(clientPayload);
 
   if (pathname === process.env.BLOB_FILENAME) {
@@ -164,6 +208,10 @@ export async function POST(request: Request) {
 
     return json(response);
   } catch (error) {
+    if (error instanceof BoardConflictError) {
+      return json({ error: "Board version conflict." }, { status: 409 });
+    }
+
     console.warn("Rejected Vercel Blob client upload token request.", error);
     return json({ error: "Upload is not allowed." }, { status: 400 });
   }
