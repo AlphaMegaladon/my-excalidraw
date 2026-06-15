@@ -12,7 +12,7 @@ import type {
 } from "@excalidraw/excalidraw/types";
 
 const STORAGE_KEY = "my-excalidraw-app-secret";
-const SAVE_DELAY_MS = 2_000;
+const SAVE_DELAY_MS = 10_000;
 const UPLOAD_ROUTE = "/api/blob/upload";
 const MULTIPART_UPLOAD_THRESHOLD_BYTES = 4 * 1024 * 1024;
 
@@ -106,7 +106,11 @@ function isBoardConflictError(error: unknown) {
     return false;
   }
 
-  return error.name === "BlobPreconditionFailedError" || error.message.includes("ETag mismatch");
+  return (
+    error.name === "BlobPreconditionFailedError" ||
+    error.message.includes("ETag mismatch") ||
+    error.message.includes("already exists")
+  );
 }
 
 function normalizeTheme(value: unknown): BoardTheme | null {
@@ -463,30 +467,6 @@ export default function BoardClient() {
     [uploadBoardFile],
   );
 
-  const assertCurrentBoardEtag = useCallback(
-    async (nextSecret: string, expectedBoardEtag: BoardEtag) => {
-      const metadataResponse = await fetch("/api/board", {
-        headers: buildAuthHeaders(nextSecret),
-        cache: "no-store",
-      });
-
-      if (!metadataResponse.ok) {
-        throw new Error("Could not check the current board version.");
-      }
-
-      const metadata: unknown = await metadataResponse.json();
-
-      if (!isBoardMetadataPayload(metadata)) {
-        throw new Error("Unexpected board metadata shape.");
-      }
-
-      if (normalizeBoardEtag(metadata.boardEtag) !== expectedBoardEtag) {
-        throw new BoardConflictError();
-      }
-    },
-    [],
-  );
-
   const uploadBoardDocument = useCallback(
     async (
       payload: BoardPayload,
@@ -498,8 +478,6 @@ export default function BoardClient() {
         type: "application/json",
       });
 
-      await assertCurrentBoardEtag(nextSecret, expectedBoardEtag);
-
       return upload(nextBoardPath, boardBlob, {
         access: "public",
         contentType: "application/json",
@@ -509,7 +487,7 @@ export default function BoardClient() {
         multipart: boardBlob.size >= MULTIPART_UPLOAD_THRESHOLD_BYTES,
       });
     },
-    [assertCurrentBoardEtag],
+    [],
   );
 
   const saveBoard = useCallback(
@@ -529,8 +507,6 @@ export default function BoardClient() {
 
       try {
         const expectedBoardEtag = boardEtagRef.current;
-        await assertCurrentBoardEtag(secret, expectedBoardEtag);
-
         const payloadWithKnownBlobUrls = replaceKnownFileDataUrls(payload);
         const payloadWithUploadedFiles = await uploadBoardFiles(payloadWithKnownBlobUrls, secret);
 
@@ -554,7 +530,6 @@ export default function BoardClient() {
       }
     },
     [
-      assertCurrentBoardEtag,
       boardPath,
       rememberUploadedFileUrls,
       replaceKnownFileDataUrls,
