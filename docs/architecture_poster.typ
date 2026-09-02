@@ -235,8 +235,8 @@
           gutter: 16pt,
           rect(fill: c-accent, radius: 8pt, inset: (x: 12pt, y: 8pt), text(weight: "bold", size: 16pt, fill: c-bg, "SCHRITT 1")),
           [
-            #text(weight: "bold", size: 18pt, fill: rgb("#ffffff"), "Benutzerinteraktion & 10s Debounce Timer") \
-            #text(size: 14pt, fill: c-dim, "Canvas erzeugt onChange Event -> latestSceneRef speichert Snapshot -> 10.000 ms Debounce Reset")
+            #text(weight: "bold", size: 18pt, fill: rgb("#ffffff"), "Trigger: Strg+S / Button / 10s Debounce Timer") \
+            #text(size: 14pt, fill: c-dim, "Canvas onChange (10s Debounce) oder manueller Sofort-Trigger (Ctrl+S / Speichern-Button)")
           ]
         )
       ]
