@@ -74,14 +74,18 @@
 
 #let arrow-down(label: none, color: c-accent) = {
   align(center)[
-    #if label != none { text(size: 13pt, fill: color, weight: "bold", label) \ }
+    #if label != none [
+      #text(size: 13pt, fill: color, weight: "bold", label) \
+    ]
     #text(size: 26pt, fill: color, "↓")
   ]
 }
 
 #let arrow-right(label: none, color: c-accent) = {
   align(center + horizon)[
-    #if label != none { text(size: 13pt, fill: color, weight: "bold", label) \ }
+    #if label != none [
+      #text(size: 13pt, fill: color, weight: "bold", label) \
+    ]
     #text(size: 28pt, fill: color, "➔")
   ]
 }
