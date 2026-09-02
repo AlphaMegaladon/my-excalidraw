@@ -248,12 +248,14 @@ export default function BoardClient() {
   const [isLoading, setIsLoading] = useState(false);
   const [loginError, setLoginError] = useState("");
   const [saveStatus, setSaveStatus] = useState<SaveStatus>("idle");
+  const [hasPendingChanges, setHasPendingChanges] = useState(false);
   const [saveError, setSaveError] = useState("");
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const latestSceneRef = useRef<SceneSnapshot | null>(null);
   const uploadedFileUrlsRef = useRef<Record<string, string>>({});
   const boardEtagRef = useRef<BoardEtag>(null);
   const hasLoadedSecretRef = useRef(false);
+  const isSavingRef = useRef(false);
 
   const isLoggedIn = secret.length > 0;
 
@@ -267,6 +269,7 @@ export default function BoardClient() {
     latestSceneRef.current = null;
     uploadedFileUrlsRef.current = {};
     boardEtagRef.current = null;
+    setHasPendingChanges(false);
   }, []);
 
   const rememberUploadedFileUrls = useCallback((payload: BoardPayload) => {
@@ -360,6 +363,7 @@ export default function BoardClient() {
         setInitialData(payload);
         rememberUploadedFileUrls(payload);
         setSaveStatus("saved");
+        setHasPendingChanges(false);
       } catch {
         setLoginError("Das Board konnte nicht geladen werden.");
       } finally {
@@ -502,6 +506,11 @@ export default function BoardClient() {
         return;
       }
 
+      if (isSavingRef.current) {
+        return;
+      }
+
+      isSavingRef.current = true;
       setSaveStatus("saving");
       setSaveError("");
 
@@ -520,6 +529,7 @@ export default function BoardClient() {
         boardEtagRef.current = normalizeBoardEtag(uploadedBoard.etag);
 
         setSaveStatus("saved");
+        setHasPendingChanges(false);
       } catch (error) {
         setSaveStatus("error");
         setSaveError(
@@ -527,6 +537,8 @@ export default function BoardClient() {
             ? BOARD_CONFLICT_MESSAGE
             : "Änderungen konnten nicht gespeichert werden.",
         );
+      } finally {
+        isSavingRef.current = false;
       }
     },
     [
@@ -557,9 +569,29 @@ export default function BoardClient() {
     };
   }, []);
 
+  const triggerImmediateSave = useCallback(async () => {
+    if (saveTimerRef.current) {
+      clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = null;
+    }
+
+    if (!latestSceneRef.current || isSavingRef.current) {
+      return;
+    }
+
+    try {
+      const payload = await buildPayloadFromScene(latestSceneRef.current);
+      await saveBoard(payload);
+    } catch {
+      setSaveStatus("error");
+      setSaveError("Änderungen konnten nicht vorbereitet werden.");
+    }
+  }, [buildPayloadFromScene, saveBoard]);
+
   const scheduleSave = useCallback(
     (scene: SceneSnapshot) => {
       latestSceneRef.current = scene;
+      setHasPendingChanges(true);
 
       if (saveTimerRef.current) {
         clearTimeout(saveTimerRef.current);
@@ -567,18 +599,10 @@ export default function BoardClient() {
 
       saveTimerRef.current = setTimeout(() => {
         saveTimerRef.current = null;
-
-        if (latestSceneRef.current) {
-          void buildPayloadFromScene(latestSceneRef.current)
-            .then(saveBoard)
-            .catch(() => {
-              setSaveStatus("error");
-              setSaveError("Änderungen konnten nicht vorbereitet werden.");
-            });
-        }
+        void triggerImmediateSave();
       }, SAVE_DELAY_MS);
     },
-    [buildPayloadFromScene, saveBoard],
+    [triggerImmediateSave],
   );
 
   const handleChange = useCallback<OnChange>(
@@ -593,6 +617,39 @@ export default function BoardClient() {
     },
     [scheduleSave],
   );
+
+  // Tastaturkürzel: Strg+S / Cmd+S für sofortiges Speichern
+  useEffect(() => {
+    if (!isLoggedIn || !initialData) {
+      return;
+    }
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
+        event.preventDefault();
+        void triggerImmediateSave();
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [initialData, isLoggedIn, triggerImmediateSave]);
+
+  // Schutz vor Datenverlust beim Verlassen der Seite mit ungespeicherten Daten
+  useEffect(() => {
+    const handleBeforeUnload = (event: BeforeUnloadEvent) => {
+      if (hasPendingChanges || saveStatus === "saving") {
+        event.preventDefault();
+      }
+    };
+
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => {
+      window.removeEventListener("beforeunload", handleBeforeUnload);
+    };
+  }, [hasPendingChanges, saveStatus]);
 
   const handleLogin = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -615,15 +672,15 @@ export default function BoardClient() {
     }
 
     if (saveStatus === "saved") {
-      return "Gespeichert";
+      return hasPendingChanges ? "Ungespeicherte Änderungen" : "Gespeichert";
     }
 
     if (saveStatus === "error") {
       return saveError || "Speicherfehler";
     }
 
-    return "Bereit";
-  }, [saveError, saveStatus]);
+    return hasPendingChanges ? "Ungespeicherte Änderungen" : "Bereit";
+  }, [hasPendingChanges, saveError, saveStatus]);
 
   return (
     <main className="relative min-h-screen bg-[#f8fafc] text-zinc-950">
@@ -640,18 +697,37 @@ export default function BoardClient() {
         </div>
       )}
 
-      <div className="pointer-events-none absolute right-4 top-4 z-10 flex items-center gap-2 rounded-md border border-zinc-200 bg-white/90 px-3 py-2 text-xs shadow-sm backdrop-blur">
-        <span
-          className={
-            saveStatus === "error"
-              ? "h-2 w-2 rounded-full bg-red-500"
-              : saveStatus === "saving"
-                ? "h-2 w-2 rounded-full bg-amber-500"
-                : "h-2 w-2 rounded-full bg-emerald-500"
-          }
-        />
-        <span>{statusText}</span>
-      </div>
+      {isLoggedIn && initialData && (
+        <div className="absolute right-4 top-4 z-10 flex items-center gap-2 rounded-lg border border-zinc-200/80 bg-white/95 p-1.5 text-xs shadow-md backdrop-blur">
+          <div className="flex items-center gap-2 px-2 py-1">
+            <span
+              className={
+                saveStatus === "error"
+                  ? "h-2 w-2 rounded-full bg-red-500 ring-2 ring-red-200"
+                  : saveStatus === "saving"
+                    ? "h-2 w-2 animate-pulse rounded-full bg-amber-500 ring-2 ring-amber-200"
+                    : hasPendingChanges
+                      ? "h-2 w-2 rounded-full bg-amber-400 ring-2 ring-amber-100"
+                      : "h-2 w-2 rounded-full bg-emerald-500 ring-2 ring-emerald-200"
+              }
+            />
+            <span className="font-medium text-zinc-700">{statusText}</span>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => void triggerImmediateSave()}
+            disabled={saveStatus === "saving" || (!hasPendingChanges && saveStatus === "saved")}
+            title="Jetzt sofort speichern (Strg + S / Cmd + S)"
+            className="flex items-center gap-1.5 rounded-md bg-zinc-900 px-2.5 py-1 text-xs font-semibold text-white shadow-xs transition hover:bg-zinc-800 disabled:cursor-default disabled:bg-zinc-200 disabled:text-zinc-400"
+          >
+            <span>Speichern</span>
+            <kbd className="hidden rounded bg-zinc-700 px-1 py-0.5 text-[10px] text-zinc-300 sm:inline-block">
+              ⌘S
+            </kbd>
+          </button>
+        </div>
+      )}
 
       {!isLoggedIn || !initialData ? (
         <div className="absolute inset-0 z-20 flex items-center justify-center bg-zinc-950/35 p-4 backdrop-blur-sm">

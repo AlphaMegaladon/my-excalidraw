@@ -28,7 +28,7 @@ Die Anwendung bietet ein passwortgeschütztes Single-Board Excalidraw-Whiteboard
 |              |                              |               |
 |              v                              v               |
 |  +--------------------------------------------------------+ |
-|  | BoardClient (State, Auto-Save Debounce, Conflict ETag) | |
+|  | BoardClient (Save Debounce, Ctrl+S, Button, ETag Lock) | |
 |  +---------------------------+----------------------------+ |
 +------------------------------|------------------------------+
                                |
@@ -86,12 +86,17 @@ Die Anwendung bietet ein passwortgeschütztes Single-Board Excalidraw-Whiteboard
 
 ---
 
-## 6. Auto-Save & Lifecycle
+## 6. Auto-Save, Manuelle Speicherung & Lifecycle
 
-- **Änderungserkennung**: `onChange` des Excalidraw-Canvas feuert bei jeder Modifikation.
-- **Debounce**: Änderungen werden gesammelt und nach 10 Sekunden Inaktivität (`SAVE_DELAY_MS = 10_000`) automatisch gespeichert.
+- **Automatisches Speichern (10s Debounce)**: Änderungen werden nach 10 Sekunden Inaktivität (`SAVE_DELAY_MS = 10_000`) automatisch persistiert, um Vercel-Kontingente zu schonen.
+- **Sofortiges Speichern (Button & Tastaturkürzel)**:
+  - **Hotkey**: `Strg + S` (Windows/Linux) bzw. `Cmd + S` (macOS) unterdrückt das Standard-Browserverhalten und triggert `triggerImmediateSave()`.
+  - **UI-Button**: Ein Klick auf den „Speichern“-Button oben rechts erzwingt den sofortigen Upload.
+  - Laufende Debounce-Timer werden bei manueller Auslösung abgebrochen.
+- **Beforeunload-Schutz**: Verhindert versehentliches Schließen des Fensters bei ausstehenden Änderungen.
 - **Statusanzeige**:
   - `Bereit` (idle / initial)
+  - `Ungespeicherte Änderungen` (pending changes)
   - `Speichert...` (saving)
   - `Gespeichert` (saved)
   - `Speicherfehler` / Konflikthinweis (error)
